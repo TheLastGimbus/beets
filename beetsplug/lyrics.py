@@ -733,6 +733,7 @@ class Google(SearchBackend):
 class Translator(RequestHandler):
     TRANSLATE_URL = "https://api.cognitive.microsofttranslator.com/translate"
     LINE_PARTS_RE = re.compile(r"^(\[\d\d:\d\d.\d\d\]|) *(.*)$")
+    remove_translations = partial(re.compile(r" / [^\n]+").sub, "")
 
     _log: beets.logging.Logger
     api_key: str
@@ -802,11 +803,22 @@ class Translator(RequestHandler):
     def translate(self, new_lyrics: str, old_lyrics: str) -> str:
         """Translate the given lyrics to the target language.
 
+        Check old lyrics for existing translations and return them if their
+        original text matches the new lyrics. This is to avoid translating
+        the same lyrics multiple times.
+
         If the lyrics are already in the target language or not in any of
         of the source languages (if configured), they are returned as is.
 
         The footer with the source URL is preserved, if present.
         """
+        if (
+            " / " in old_lyrics
+            and self.remove_translations(old_lyrics) == new_lyrics
+        ):
+            self.info("🔵 Translations already exist")
+            return old_lyrics
+
         lyrics_language = langdetect.detect(new_lyrics)
         if lyrics_language != self.to_lang and (
             not self.from_langs or lyrics_language in self.from_langs
@@ -814,9 +826,10 @@ class Translator(RequestHandler):
             lyrics, *url = new_lyrics.split("\n\nSource: ")
             with self.handle_request():
                 translated_lines = self.append_translations(lyrics.splitlines())
+                self.info("🟢 Translated lyrics to {}", self.to_lang.upper())
                 return "\n\nSource: ".join(["\n".join(translated_lines), *url])
 
-        return lyrics
+        return new_lyrics
 
 
 @dataclass
@@ -1052,12 +1065,7 @@ class LyricsPlugin(RequestHandler, plugins.BeetsPlugin):
         if lyrics := self.find_lyrics(item):
             self.info("🟢 Found lyrics: {0}", item)
             if translator := self.translator:
-                initial_lyrics = lyrics
-                if (lyrics := translator.translate(lyrics)) != initial_lyrics:
-                    self.info(
-                        "🟢 Added translation to {}",
-                        self.config["translate_to"].get().upper(),
-                    )
+                lyrics = translator.translate(lyrics, item.lyrics)
         else:
             self.info("🔴 Lyrics not found: {}", item)
             lyrics = self.config["fallback"].get()
